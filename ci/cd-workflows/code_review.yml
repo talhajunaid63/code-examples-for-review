@@ -1,0 +1,101 @@
+name: AI-Enhanced Code Review & CI/CD
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches: [ "staging" ]
+
+jobs:
+  ai-code-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Get PR Diff
+        id: get_diff
+        run: |
+          git fetch origin staging
+          git diff origin/staging...HEAD > diff.patch
+          echo "PR_DIFF<<EOF" >> $GITHUB_ENV
+          cat diff.patch >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Send Diff to Claude for Review
+        id: claude_review
+        run: |
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${{ secrets.CLAUDE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"claude-3-sonnet-20240229\",
+              \"max_tokens\": 500,
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"You are a senior code reviewer. Review code for style, security, performance, and tests.\"},
+                {\"role\": \"user\", \"content\": \"Review this code diff:\n${{ env.PR_DIFF }}\"}
+              ]
+            }")
+          echo "AI_FEEDBACK=$RESPONSE" >> $GITHUB_ENV
+
+      - name: Post AI Code Review Feedback
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            🤖 **Claude AI Code Review Feedback**
+            ${{ env.AI_FEEDBACK }}
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: ai-code-review
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Run tests
+        id: run_tests
+        run: |
+          set +e
+          bundle exec rspec --format documentation > test_output.log 2>&1
+          EXIT_CODE=$?
+          echo "EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
+          echo "TEST_LOG<<EOF" >> $GITHUB_ENV
+          cat test_output.log >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          exit 0  # allow workflow to continue
+
+      - name: Send Test Logs to Claude (if failed)
+        if: env.EXIT_CODE != '0'
+        run: |
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${{ secrets.CLAUDE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"claude-3-sonnet-20240229\",
+              \"max_tokens\": 500,
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"You are a senior DevOps engineer. Summarize CI/CD failure logs and suggest fixes.\"},
+                {\"role\": \"user\", \"content\": \"Here are the failed test/build logs:\n${{ env.TEST_LOG }}\"}
+              ]
+            }")
+          echo "AI_ANALYSIS=$RESPONSE" >> $GITHUB_ENV
+
+      - name: Post AI Failure Analysis as PR Comment
+        if: env.EXIT_CODE != '0'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ❌ **Build/Test Failed**
+            🤖 Claude AI Analysis:
+            ${{ env.AI_ANALYSIS }}

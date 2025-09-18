@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+# stop the workflow if PR is merged or closed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cypress_e2e:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:14
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgres://postgres:password@localhost:5432/test_db
+      CYPRESS: true
+      DB_HOST: postgres
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2.0" # Match your Rails version
+          bundler-cache: true
+
+      - name: Install Rails dependencies
+
+        run: |
+          bundle config set --local without development production
+          bundle install
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - name: Find yarn cache location
+        id: yarn-cache
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+
+      - name: JS package cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+      - name: Cache Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ runner.os }}-cypress-${{ hashFiles('yarn.lock') }}-14.5.2 # Pin Cypress version
+          restore-keys: |
+            ${{ runner.os }}-cypress-
+
+      - name: Install Node dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build assets
+        run: bin/rails assets:precompile
+        env:
+          RAILS_ENV: test
+
+      - name: Setup DB
+        run: |
+          bin/rails db:create db:schema:load
+
+      - name: Start Rails server in background
+        run: bin/rails server -e test -p 5017 > rails.log 2>&1 & sleep 10
+        env:
+          CI: true
+          CYPRESS: true
+          RAILS_ENV: test
+          DATABASE_URL: postgres://postgres:password@localhost:5432/test_db
+
+      - name: Run Cypress tests
+        run: yarn run cypress run --project ./test/e2e
+
+      # view Rails logs if Cypress tests fail
+      - name: Display Rails logs
+        if: failure()
+        run: cat rails.log
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Lint code for consistent style
+        run: bin/rubocop -f github

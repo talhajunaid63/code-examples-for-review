@@ -1,0 +1,73 @@
+name: Deploy to staging
+
+on:
+  push:
+    branches:
+      - staging
+
+concurrency:
+  group: staging
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: 1
+      RAILS_ENV: staging
+      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY_STAGING }}
+      DOCKER_PAT: ${{ secrets.DOCKER_PAT }}
+
+    steps:
+      # Checkout the latest code
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Set up Docker Buildx for building containers
+      - name: Set up Docker Buildx
+        id: staging-buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Set up Ruby environment
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2.0
+          bundler-cache: true
+
+      # Install Kamal gem
+      - name: Install Kamal
+        run: gem install kamal -v 2.7.0
+
+      # Debug: Verify credentials file exists
+      # - name: Check credentials file
+      #   run: |
+      #     echo "Checking credentials file..."
+      #     ls -la config/credentials
+      #     if [ -f config/credentials/staging.yml.enc ]; then
+      #       echo "Staging credentials file found"
+      #     else
+      #       echo "Error: Staging credentials file not found" && exit 1
+      #     fi
+      #     echo "RAILS_ENV: $RAILS_ENV"
+      #     echo "RAILS_MASTER_KEY is set: $(if [ -n "$RAILS_MASTER_KEY" ]; then echo 'yes'; else echo 'no'; fi)"
+      #     echo "Attempting to read credentials..."
+      #     bundle exec rails runner "puts Rails.application.credentials.secret_key_base || 'Credentials not accessible'"
+
+      # Set up SSH agent for server access
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # Release any existing deployment lock
+      - name: Release Kamal lock
+        run: kamal lock release -d staging
+
+      # Deploy the application
+      - name: Deploy with Kamal
+        run: |
+          echo "RAILS_MASTER_KEY=$RAILS_MASTER_KEY" >> .kamal/secrets.staging
+          echo "DOCKER_PAT=$DOCKER_PAT" >> .kamal/secrets.staging
+
+          kamal deploy -d staging
